@@ -255,10 +255,10 @@
 <div class="search-section">
   <div class="search-controls">
     <select id="timeFilter">
-      <option value="week">Past Week</option>
-      <option value="month">Past Month</option>
-      <option value="year">Past Year</option>
-      <option value="all">All Time</option>
+      <option value="day">Past Day</option>
+      <option value="today">Today</option>
+      <option value="6h">Past 6 Hours</option>
+      <option value="2h">Past 2 Hours</option>
     </select>
     <select id="sortFilter">
       <option value="new">Newest First</option>
@@ -275,14 +275,21 @@
 
 <script>
   const SEARCH_QUERIES = [
-    'san diego airport security wait time',
-    'SAN airport TSA wait',
-    'san diego airport terminal 2 security line',
-    'san diego airport terminal 2 wait',
-    'SAN airport security line',
+    'san diego airport security wait',
+    'SAN airport TSA',
+    'SAN airport wait',
+    'TSA wait SAN',
+    'san diego airport terminal security',
   ];
 
-  const SUBREDDITS = ['sandiego', 'sandiegan', 'travel', 'flights', 'TSA'];
+  // Subreddit-specific queries (these subs are already San Diego or airport focused)
+  const SUBREDDIT_SEARCHES = [
+    { sub: 'sandiego', queries: ['airport', 'TSA', 'SAN airport', 'security wait airport', 'terminal wait'] },
+    { sub: 'sandiegan', queries: ['airport', 'TSA', 'SAN airport'] },
+    { sub: 'travel', queries: ['san diego airport TSA', 'SAN airport wait'] },
+    { sub: 'flights', queries: ['san diego airport', 'SAN TSA wait'] },
+    { sub: 'TSA', queries: ['san diego', 'SAN airport'] },
+  ];
 
   const RELEVANT_KEYWORDS = [
     'wait', 'line', 'security', 'tsa', 'terminal', 'checkpoint',
@@ -378,20 +385,47 @@
     infoBar.textContent = 'Searching Reddit for San Diego Airport wait times...';
 
     try {
+      // Map custom time filters to Reddit API 't' parameter and cutoff
+      let apiTime = 'day';
+      let cutoffSeconds = null;
+      const now = Math.floor(Date.now() / 1000);
+      if (timeFilter === '2h') {
+        apiTime = 'day';
+        cutoffSeconds = now - 2 * 3600;
+      } else if (timeFilter === '6h') {
+        apiTime = 'day';
+        cutoffSeconds = now - 6 * 3600;
+      } else if (timeFilter === 'today') {
+        apiTime = 'day';
+        const todayStart = new Date();
+        todayStart.setHours(0, 0, 0, 0);
+        cutoffSeconds = Math.floor(todayStart.getTime() / 1000);
+      } else {
+        apiTime = 'day';
+        cutoffSeconds = null; // full day
+      }
+
+      const sort = sortFilter === 'comments' ? 'comments' : sortFilter === 'top' ? 'top' : sortFilter;
+
       // Run multiple searches in parallel for better coverage
       const searchPromises = [];
 
-      // Search specific subreddits
-      for (const sub of SUBREDDITS) {
-        const q = encodeURIComponent('san diego airport security wait');
-        const url = `https://www.reddit.com/r/${sub}/search.json?q=${q}&restrict_sr=1&sort=${sortFilter === 'comments' ? 'comments' : sortFilter === 'top' ? 'top' : sortFilter}&t=${timeFilter}&limit=15`;
-        searchPromises.push(fetchJSON(url).catch(() => null));
+      // Search specific subreddits with targeted queries
+      for (const { sub, queries } of SUBREDDIT_SEARCHES) {
+        for (const query of queries) {
+          const q = encodeURIComponent(query);
+          const url = `https://www.reddit.com/r/${sub}/search.json?q=${q}&restrict_sr=1&sort=${sort}&t=${apiTime}&limit=25`;
+          searchPromises.push(fetchJSON(url).catch(() => null));
+        }
       }
+
+      // Also fetch recent posts from r/sandiego (new posts) to catch anything the search misses
+      searchPromises.push(fetchJSON(`https://www.reddit.com/r/sandiego/new.json?limit=50`).catch(() => null));
 
       // General Reddit search with different queries
       for (const query of SEARCH_QUERIES) {
         const q = encodeURIComponent(query);
-        const url = `https://www.reddit.com/search.json?q=${q}&sort=${sortFilter === 'comments' ? 'comments' : sortFilter === 'top' ? 'top' : sortFilter}&t=${timeFilter}&limit=15`;
+        const url = `https://www.reddit.com/search.json?q=${q}&sort=${sort}&t=${apiTime}&limit=25`;
         searchPromises.push(fetchJSON(url).catch(() => null));
       }
 
@@ -408,11 +442,22 @@
         }
       }
 
-      // Filter for relevance - must mention San Diego airport
+      // Filter for relevance - must relate to San Diego airport
       let posts = Array.from(postMap.values()).filter(post => {
-        const text = (post.title + ' ' + (post.selftext || '') + ' ' + (post.subreddit || '')).toLowerCase();
-        const hasSanDiego = text.includes('san diego') || text.includes('san_diego') || text.includes('r/sandiego') || text.includes('r/sandiegan') || text.includes('lindbergh');
-        const hasSAN = /\bsan\b/.test(text) && (text.includes('airport') || text.includes('terminal') || text.includes('tsa') || text.includes('security'));
+        // Apply time cutoff for custom filters
+        if (cutoffSeconds && post.created_utc < cutoffSeconds) return false;
+
+        const text = (post.title + ' ' + (post.selftext || '')).toLowerCase();
+        const sub = (post.subreddit || '').toLowerCase();
+
+        // Posts from r/sandiego or r/sandiegan just need airport/TSA keywords
+        const isLocalSub = sub === 'sandiego' || sub === 'sandiegan';
+        const hasAirportKeyword = text.includes('airport') || text.includes('terminal') || text.includes('tsa') || text.includes('security line') || text.includes('checkpoint');
+        if (isLocalSub && hasAirportKeyword) return true;
+
+        // For other subs, need San Diego + airport context
+        const hasSanDiego = text.includes('san diego') || text.includes('san_diego') || text.includes('lindbergh');
+        const hasSAN = /\bsan\b/i.test(text) && (text.includes('airport') || text.includes('terminal') || text.includes('tsa') || text.includes('security'));
         const hasAirport = text.includes('airport') || text.includes('terminal') || text.includes('tsa') || text.includes('security') || text.includes('flight');
         return (hasSanDiego || hasSAN) && hasAirport;
       });
